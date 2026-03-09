@@ -1,0 +1,12 @@
+# Ignore local secrets folder
+secrets/
+
+# Python artifacts
+*.pyc
+__pycache__/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
