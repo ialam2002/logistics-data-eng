@@ -60,6 +60,21 @@ services:
     # volumes:
     #   - ./secrets/openweather_api_key:/run/secrets/openweather_api_key:ro
 
+  dashboard:
+    build: .
+    container_name: dashboard
+    command: streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    environment:
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "logistics_reports"
+      POSTGRES_USER: "admin"
+      POSTGRES_PASSWORD: "password123"
+    ports:
+      - "8501:8501"
+    depends_on:
+      - postgres
+
   kafdrop:
     image: obsidiandynamics/kafdrop:latest
     ports:
