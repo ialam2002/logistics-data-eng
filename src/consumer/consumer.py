@@ -42,6 +42,7 @@ state = {
     'running': True,
     'kafka_connected': False,
     'db_connected': False,
+    'table_exists': False,
     'last_processed_id': None,
 }
 
@@ -92,6 +93,33 @@ while db_attempt < max_db_attempts and conn is None and state['running']:
 
 if conn is None:
     raise RuntimeError(f"Could not connect to Postgres at {POSTGRES_HOST} after {max_db_attempts} attempts")
+
+
+def ensure_table_exists():
+    """Create the weather_alerts table if it doesn't exist and update state['table_exists']."""
+    create_sql = """
+    CREATE TABLE IF NOT EXISTS weather_alerts (
+        id SERIAL PRIMARY KEY,
+        truck_id VARCHAR(50) NOT NULL,
+        lat FLOAT,
+        lon FLOAT,
+        weather_main VARCHAR(50),
+        wind_speed FLOAT,
+        risk_level VARCHAR(20),
+        event_timestamp TIMESTAMP,
+        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(create_sql)
+            # create a simple index to speed time-range queries
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_event_timestamp ON weather_alerts(event_timestamp);")
+        state['table_exists'] = True
+        print('Ensured weather_alerts table exists')
+    except Exception as e:
+        state['table_exists'] = False
+        print(f'Failed to ensure table exists: {e}')
 
 
 def save_to_db(data, risk, weather_info):
@@ -158,7 +186,7 @@ def get_weather_risk(lat, lon):
 # Health HTTP server
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != '/health':
+        if self.path not in ['/health', '/ready']:
             self.send_response(404)
             self.end_headers()
             return
@@ -166,10 +194,15 @@ class HealthHandler(BaseHTTPRequestHandler):
             'running': state['running'],
             'kafka_connected': state['kafka_connected'],
             'db_connected': state['db_connected'],
+            'table_exists': state.get('table_exists'),
             'last_processed_id': state.get('last_processed_id')
         }
         body = json.dumps(payload).encode('utf-8')
-        self.send_response(200)
+        # If readiness check and table/db not ready, return 503
+        if self.path == '/ready' and (not state['db_connected'] or not state['table_exists'] or not state['kafka_connected']):
+            self.send_response(503)
+        else:
+            self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -183,6 +216,9 @@ def start_health_server():
     print(f"Health server listening on 0.0.0.0:{HEALTH_PORT}")
     return server
 
+
+# Ensure the table is present before starting the consumer loop
+ensure_table_exists()
 
 # Consumer loop using poll so shutdown is responsive
 print("Listening for truck updates...")
@@ -236,7 +272,19 @@ try:
 
                     # Persist to DB (best effort)
                     try:
-                        save_to_db(truck_data, risk_level, weather)
+                        # Attempt to save; if table was missing, try to create it and retry once
+                        try:
+                            save_to_db(truck_data, risk_level, weather)
+                        except Exception as e:
+                            print(f"Failed to save to DB on first attempt: {e}")
+                            # Try ensuring the table exists and retry once
+                            ensure_table_exists()
+                            try:
+                                save_to_db(truck_data, risk_level, weather)
+                            except Exception as e2:
+                                print(f"Failed to save to DB after ensuring table: {e2}")
+                                raise
+
                         # update state for health checks
                         state['last_processed_id'] = getattr(rec, 'offset', None)
                     except Exception as e:

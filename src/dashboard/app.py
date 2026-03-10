@@ -25,9 +25,13 @@ st.title('Logistics — Live Alerts Dashboard')
 st.markdown('Stream of truck telemetry and weather risk alerts. Data source: Postgres `weather_alerts` table.')
 
 
-@st.cache_data(ttl=15)
+@st.cache_resource
 def get_db_conn():
-    """Return a new DB connection or raise an exception."""
+    """Return a new DB connection.
+
+    Use st.cache_resource (not st.cache_data) because psycopg2 connection objects are not
+    pickle-serializable. This keeps a single connection per session safely cached.
+    """
     conn = psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -36,6 +40,8 @@ def get_db_conn():
         password=DB_PASSWORD,
         cursor_factory=RealDictCursor,
     )
+    # Use autocommit to avoid needing to manage transactions here
+    conn.autocommit = True
     return conn
 
 
@@ -56,7 +62,7 @@ def load_recent_alerts(limit: int = 200) -> pd.DataFrame:
                 (limit,)
             )
             rows = cur.fetchall()
-        conn.close()
+        # don't close the cached connection; leave it managed by Streamlit
         if not rows:
             return pd.DataFrame(columns=['id','truck_id','lat','lon','weather_main','wind_speed','risk_level','event_timestamp','processed_at'])
         df = pd.DataFrame(rows)
@@ -106,7 +112,9 @@ def show_map(df: pd.DataFrame, trails_df: pd.DataFrame | None = None, show_trail
         'UNKNOWN': [128, 128, 128]
     }
     map_df['color'] = map_df['risk_level'].map(lambda r: color_map.get(r, [128, 128, 128]))
-    map_df['radius'] = (map_df['wind_speed'].fillna(0).astype(float) + 1.0) * 800
+    # Visual improvement: smaller base radius and scale by wind; clamp radii for readability
+    map_df['radius'] = (map_df['wind_speed'].fillna(0).astype(float) + 0.5) * 500
+    map_df['radius'] = map_df['radius'].clip(lower=100, upper=6000)
 
     # Center view
     center_lat = float(map_df['lat'].mean()) if not map_df['lat'].isna().all() else 0
@@ -127,6 +135,8 @@ def show_map(df: pd.DataFrame, trails_df: pd.DataFrame | None = None, show_trail
                 # color: use most recent risk for that truck if available
                 recent_risk = g.sort_values('event_timestamp', ascending=False).iloc[0].get('risk_level')
                 color = color_map.get(recent_risk, [128,128,128])
+                # Add alpha for trail fading effect by duplicating intermediate points with lower alpha is not supported directly;
+                # instead set a solid color and thinner width for trails to avoid clutter
                 path_rows.append({'truck_id': truck_id, 'path': pts, 'color': color, 'width': 4})
             if path_rows:
                 path_layer = pdk.Layer(
@@ -142,15 +152,17 @@ def show_map(df: pd.DataFrame, trails_df: pd.DataFrame | None = None, show_trail
                 )
                 layers.append(path_layer)
 
-        # Scatter layer for latest positions
+        # Scatter layer for latest positions — improved visuals: stroke and pickable popups
         scatter = pdk.Layer(
             "ScatterplotLayer",
             data=map_df,
             get_position='[lon, lat]',
             get_radius='radius',
             radius_min_pixels=6,
-            radius_max_pixels=60,
+            radius_max_pixels=20,
             get_fill_color='color',
+            get_line_color='[0,0,0]',
+            line_width_min_pixels=1,
             pickable=True,
             auto_highlight=True,
         )

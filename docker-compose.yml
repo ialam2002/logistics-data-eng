@@ -27,7 +27,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./postgres-init:/docker-entrypoint-initdb.d
+      # Point to the infra folder that contains init SQL so the table gets created on first startup
+      - ./infra/postgres-init:/docker-entrypoint-initdb.d
 
   producer:
     build: .
@@ -54,11 +55,9 @@ services:
     depends_on:
       - kafka
       - postgres
-    # Optional: bind-mount a local secrets file into the container. Create
-    # a file at ./secrets/openweather_api_key containing only your API key
-    # (and add ./secrets to .gitignore). Uncomment the following lines to enable:
-    # volumes:
-    #   - ./secrets/openweather_api_key:/run/secrets/openweather_api_key:ro
+    # Use Docker Compose secrets so API keys are not stored directly in the compose file or .env
+    secrets:
+      - openweather_api_key
 
   dashboard:
     build: .
@@ -83,3 +82,8 @@ services:
       KAFKA_BROKERCONNECT: "kafka:29092"
     depends_on:
       - kafka
+
+# Top-level secrets definition: map to a local file (create ./secrets/openweather_api_key locally and keep it out of VCS)
+secrets:
+  openweather_api_key:
+    file: ./secrets/openweather_api_key
